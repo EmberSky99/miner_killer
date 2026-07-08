@@ -321,7 +321,7 @@ scan_overview() {
     log "${CYAN}[*] DNS Servers (/etc/resolv.conf):${NC}"
     grep "nameserver" /etc/resolv.conf 2>/dev/null
     echo ""
-    ask "Press Enter to start SCAN..." dummy
+    log "${GREEN}[*] Starting automated scan...${NC}"
 }
 
 # --- 1. 进程查杀 ---
@@ -386,50 +386,47 @@ scan_process() {
         if [ -n "$target_ip" ]; then echo -e "  Net   : ${RED}Connected to: $target_ip${NC} -> $ip_info"; fi
         if [ -n "$detected_service" ]; then echo -e "${RED}[!] LINKED SERVICE: $detected_service${NC}"; fi
 
-        ask "Is this MALICIOUS? Kill & Delete? (y/Enter to skip): " confirm_auto
-        if [[ "$confirm_auto" =~ ^[yY] ]]; then
-            if [ -n "$target_ip" ] && has_cmd iptables; then
-                ask "${RED}Block IP $target_ip in iptables? (y/n): ${NC}" block_ip
-                if [[ "$block_ip" =~ ^[yY] ]]; then
-                    if iptables -I OUTPUT -d "$target_ip" -j DROP 2>/dev/null && iptables -I INPUT -s "$target_ip" -j DROP 2>/dev/null; then
-                        log "${GREEN}[✔] IP $target_ip blocked.${NC}"
-                    else
-                        log "${RED}[X] Failed to block IP $target_ip${NC}"
-                    fi
-                fi
-            fi
-            log "${RED}KILLING PID $pid...${NC}"
+        log "${GREEN}[✔] AUTO: Malicious process detected. Proceeding to kill & delete...${NC}"
 
-            # 先冻结进程防止守护进程复活
-            if kill -STOP "$pid" 2>/dev/null; then
-                log "${CYAN}[*] Process frozen (SIGSTOP)${NC}"
-            fi
-
-            # 停止关联的 service
-            if [ -n "$detected_service" ]; then
-                systemctl stop "$(basename "$detected_service")" 2>/dev/null || true
-                systemctl disable "$(basename "$detected_service")" 2>/dev/null || true
-            fi
-
-            # 删除可执行文件（进程已冻结，无法复活）
-            if [ -n "$exe_path" ]; then
-                quarantine_and_remove "$exe_path"
-            fi
-
-            # 彻底清理：击杀进程组
-            if kill -9 "-$pid" 2>/dev/null; then
-                log "${GREEN}[✔] Process group killed${NC}"
-            elif kill -9 "$pid" 2>/dev/null; then
-                log "${GREEN}[✔] Process killed${NC}"
+        # 自动封禁 IP
+        if [ -n "$target_ip" ] && has_cmd iptables; then
+            if iptables -I OUTPUT -d "$target_ip" -j DROP 2>/dev/null && iptables -I INPUT -s "$target_ip" -j DROP 2>/dev/null; then
+                log "${GREEN}[✔] IP $target_ip auto-blocked.${NC}"
             else
-                log "${RED}[X] Failed to kill PID $pid${NC}"
+                log "${RED}[X] Failed to block IP $target_ip${NC}"
             fi
+        fi
 
-            # 删除 service 文件
-            if [ -n "$detected_service" ] && [ -f "$detected_service" ]; then
-                ask "Also delete service file $detected_service ? (y/n): " c_svc
-                [[ "$c_svc" =~ ^[yY] ]] && quarantine_and_remove "$detected_service"
-            fi
+        log "${RED}KILLING PID $pid...${NC}"
+
+        # 先冻结进程防止守护进程复活
+        if kill -STOP "$pid" 2>/dev/null; then
+            log "${CYAN}[*] Process frozen (SIGSTOP)${NC}"
+        fi
+
+        # 停止关联的 service
+        if [ -n "$detected_service" ]; then
+            systemctl stop "$(basename "$detected_service")" 2>/dev/null || true
+            systemctl disable "$(basename "$detected_service")" 2>/dev/null || true
+        fi
+
+        # 删除可执行文件（进程已冻结，无法复活）
+        if [ -n "$exe_path" ]; then
+            quarantine_and_remove "$exe_path"
+        fi
+
+        # 彻底清理：击杀进程组
+        if kill -9 "-$pid" 2>/dev/null; then
+            log "${GREEN}[✔] Process group killed${NC}"
+        elif kill -9 "$pid" 2>/dev/null; then
+            log "${GREEN}[✔] Process killed${NC}"
+        else
+            log "${RED}[X] Failed to kill PID $pid${NC}"
+        fi
+
+        # 自动删除 service 文件
+        if [ -n "$detected_service" ] && [ -f "$detected_service" ]; then
+            quarantine_and_remove "$detected_service"
         fi
     done
 }
@@ -443,15 +440,15 @@ scan_integrity() {
     if grep -iE "virustotal|clamav|kaspersky|symantec" /etc/hosts >/dev/null 2>&1; then
         echo -e "${RED}[!!!] Security domains blocked in /etc/hosts!${NC}"
         grep -iE "virustotal|clamav|kaspersky|symantec" /etc/hosts
-        ask "Fix /etc/hosts? (y/n): " fix_hosts
-        if [[ "$fix_hosts" =~ ^[yY] ]]; then
-            if cp /etc/hosts /etc/hosts.bak; then
-                sed -i '/virustotal/d' /etc/hosts
-                sed -i '/clamav/d' /etc/hosts
-                log "${GREEN}[✔] /etc/hosts cleaned.${NC}"
-            else
-                log "${RED}[X] Failed to backup /etc/hosts${NC}"
-            fi
+        log "${YELLOW}[*] Auto-fixing /etc/hosts...${NC}"
+        if cp /etc/hosts /etc/hosts.bak; then
+            sed -i '/virustotal/d' /etc/hosts
+            sed -i '/clamav/d' /etc/hosts
+            sed -i '/kaspersky/d' /etc/hosts
+            sed -i '/symantec/d' /etc/hosts
+            log "${GREEN}[✔] /etc/hosts cleaned.${NC}"
+        else
+            log "${RED}[X] Failed to backup /etc/hosts${NC}"
         fi
     else
         log "${GREEN}[OK] /etc/hosts looks clean.${NC}"
@@ -467,9 +464,12 @@ scan_integrity() {
         if [ -f "$global_file" ] && grep -Eq "$SUSPICIOUS_CMD_REGEX" "$global_file"; then
             echo -e "${RED}[!!!] Suspicious command found in GLOBAL config: $global_file${NC}"
             grep -E --color=always "$SUSPICIOUS_CMD_REGEX" "$global_file"
-            ask "${RED}Edit global config? (y/n): ${NC}" edit_global
-            if [[ "$edit_global" =~ ^[yY] ]]; then
-                ${EDITOR:-vi} "$global_file" < /dev/tty || log "${RED}[X] Failed to edit $global_file${NC}"
+            log "${YELLOW}[*] Auto-cleaning $global_file...${NC}"
+            if cp "$global_file" "${global_file}.bak" 2>/dev/null; then
+                sed -i -E "/$SUSPICIOUS_CMD_REGEX/d" "$global_file" 2>/dev/null
+                log "${GREEN}[✔] Cleaned: $global_file (backup: ${global_file}.bak)${NC}"
+            else
+                log "${RED}[X] Failed to clean $global_file${NC}"
             fi
         fi
     done
@@ -481,9 +481,12 @@ scan_integrity() {
                 if [ -f "$target" ] && grep -Eq "$SUSPICIOUS_CMD_REGEX" "$target"; then
                     echo -e "${RED}[!!!] Suspicious command in $target:${NC}"
                     grep -E --color=always "$SUSPICIOUS_CMD_REGEX" "$target" | head -n 5
-                    ask "${RED}Edit/Clean this file? (y/n): ${NC}" edit_opt
-                    if [[ "$edit_opt" =~ ^[yY] ]]; then
-                        ${EDITOR:-vi} "$target" < /dev/tty || log "${RED}[X] Failed to edit $target${NC}"
+                    log "${YELLOW}[*] Auto-cleaning $target...${NC}"
+                    if cp "$target" "${target}.bak" 2>/dev/null; then
+                        sed -i -E "/$SUSPICIOUS_CMD_REGEX/d" "$target" 2>/dev/null
+                        log "${GREEN}[✔] Cleaned: $target (backup: ${target}.bak)${NC}"
+                    else
+                        log "${RED}[X] Failed to clean $target${NC}"
                     fi
                 fi
             done
@@ -506,31 +509,17 @@ scan_docker() {
             log "No containers found."
         else
             cnt=1; for c in "${docker_list[@]}"; do echo -e "[$cnt] $c"; ((cnt++)); done
-
-            while true; do
-                echo ""; ask "Select Number to INSPECT (Enter to continue): " choice
-                if [ -z "$choice" ]; then break; fi
-                if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#docker_list[@]}" ]; then
-                    index=$((choice-1)); cid=$(echo "${docker_list[$index]}" | awk '{print $1}')
-                    echo -e "${BLUE}--- Inspecting Container $cid ---${NC}"
-                    if docker inspect --format 'Image: {{.Config.Image}} Cmd: {{.Config.Cmd}}' "$cid" 2>/dev/null; then
-                        ask "${RED}Confirm STOP & REMOVE? (y/n): ${NC}" confirm
-                        if [[ "$confirm" =~ ^[yY] ]]; then
-                            if docker stop "$cid" 2>/dev/null && docker rm "$cid" 2>/dev/null; then
-                                log "${GREEN}[✔] Container removed.${NC}"
-                                ask "Also remove image? (y/n): " rmi
-                                if [[ "$rmi" =~ ^[yY] ]]; then
-                                    img=$(docker inspect --format='{{.Image}}' "$cid" 2>/dev/null)
-                                    [ -n "$img" ] && docker rmi "$img" 2>/dev/null || true
-                                fi
-                            else
-                                log "${RED}[X] Failed to remove container${NC}"
-                            fi
-                        fi
-                    else
-                        echo "Container not found."
-                    fi
-                else echo "Invalid selection."; fi
+            log "${YELLOW}[*] Auto-removing all containers...${NC}"
+            for c in "${docker_list[@]}"; do
+                cid=$(echo "$c" | awk '{print $1}')
+                log "${YELLOW}[*] Stopping & removing container $cid...${NC}"
+                if docker stop "$cid" 2>/dev/null && docker rm "$cid" 2>/dev/null; then
+                    log "${GREEN}[✔] Container $cid removed.${NC}"
+                    img=$(docker inspect --format='{{.Image}}' "$cid" 2>/dev/null)
+                    [ -n "$img" ] && docker rmi "$img" 2>/dev/null || true
+                else
+                    log "${RED}[X] Failed to remove container $cid${NC}"
+                fi
             done
         fi
     else
@@ -564,28 +553,16 @@ scan_pm2() {
             log "No running PM2 processes found."
         else
             cnt=1; for item in "${pm2_list[@]}"; do echo -e "[$cnt] $item"; ((cnt++)); done
-
-            while true; do
-                echo ""; ask "Select Number to INSPECT (Enter to continue): " choice
-                if [ -z "$choice" ]; then break; fi
-                if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#pm2_list[@]}" ]; then
-                    index=$((choice-1)); target_id=$(echo "${pm2_list[$index]}" | awk -F'|' '{print $1}' | cut -d: -f2 | tr -d ' ')
-                    echo -e "${BLUE}--- Inspecting PM2 ID $target_id ---${NC}"
-                    if pm2 show "$target_id" 2>/dev/null | grep -E "script path|args|error log|out log|exec mode|created at"; then
-                        echo -e "${BLUE}------------------------------------${NC}"
-                        ask "${RED}Confirm DELETE PM2 ID $target_id? (y/n): ${NC}" confirm
-                        if [[ "$confirm" =~ ^[yY] ]]; then
-                            if pm2 stop "$target_id" 2>/dev/null && pm2 delete "$target_id" 2>/dev/null && pm2 save 2>/dev/null; then
-                                log "${GREEN}[✔] PM2 process $target_id deleted.${NC}"
-                            else
-                                log "${RED}[X] Failed to delete PM2 process $target_id${NC}"
-                            fi
-                        fi
-                    else
-                        log "${RED}[X] Failed to show PM2 process $target_id${NC}"
-                    fi
-                else echo "Invalid selection."; fi
+            log "${YELLOW}[*] Auto-deleting all PM2 processes...${NC}"
+            for item in "${pm2_list[@]}"; do
+                target_id=$(echo "$item" | awk -F'|' '{print $1}' | cut -d: -f2 | tr -d ' ')
+                if [ -n "$target_id" ]; then
+                    pm2 stop "$target_id" 2>/dev/null
+                    pm2 delete "$target_id" 2>/dev/null
+                    log "${GREEN}[✔] PM2 process $target_id deleted.${NC}"
+                fi
             done
+            pm2 save 2>/dev/null
         fi
     else
         log "PM2 not found."
@@ -612,25 +589,20 @@ scan_persistence() {
             echo -e "[$cnt] $f $warning"; ((cnt++))
         done
 
-        while true; do
-            echo ""; ask "Select Number to INSPECT CONTENT (Enter to continue): " choice
-            if [ -z "$choice" ]; then break; fi
-            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#cron_files[@]}" ]; then
-                index=$((choice-1)); target_cron="${cron_files[$index]}"
-                if [ ! -f "$target_cron" ]; then echo "File not found."; continue; fi
-                echo -e "${BLUE}================ FILE CONTENT: $target_cron =================${NC}"
-                cat "$target_cron"
-                echo -e "${BLUE}============================================================${NC}"
-                ask "${RED}Edit this file manually to remove malicious lines? (y/n): ${NC}" confirm
-                if [[ "$confirm" =~ ^[yY] ]]; then
-                    if cp "$target_cron" "${target_cron}.bak"; then
-                        ${EDITOR:-vi} "$target_cron" < /dev/tty || log "${RED}[X] Failed to edit $target_cron${NC}"
-                        log "${GREEN}[✔] File edited: $target_cron (backup: ${target_cron}.bak)${NC}"
-                    else
-                        log "${RED}[X] Failed to backup $target_cron${NC}"
-                    fi
+        log "${YELLOW}[*] Auto-cleaning crontab files...${NC}"
+        for target_cron in "${cron_files[@]}"; do
+            if [ ! -f "$target_cron" ]; then continue; fi
+            echo -e "${BLUE}================ FILE CONTENT: $target_cron =================${NC}"
+            cat "$target_cron"
+            echo -e "${BLUE}============================================================${NC}"
+            if grep -Eq "curl|wget|base64|sh |bash " "$target_cron" 2>/dev/null; then
+                if cp "$target_cron" "${target_cron}.bak" 2>/dev/null; then
+                    sed -i -E '/curl|wget|base64|sh |bash /d' "$target_cron" 2>/dev/null
+                    log "${GREEN}[✔] Suspicious lines removed: $target_cron (backup: ${target_cron}.bak)${NC}"
+                else
+                    log "${RED}[X] Failed to backup $target_cron${NC}"
                 fi
-            else echo "Invalid selection."; fi
+            fi
         done
     fi
     
@@ -649,25 +621,19 @@ scan_persistence() {
             echo "[$cnt] $mod_time $svc"; ((cnt++))
         done
 
-        while true; do
-            echo ""; ask "Select Number to INSPECT CONTENT (Enter to continue): " choice
-            if [ -z "$choice" ]; then break; fi
-            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#service_files[@]}" ]; then
-                index=$((choice-1)); target_svc="${service_files[$index]}"
-                if [ ! -f "$target_svc" ]; then echo "File not found."; continue; fi
-                echo -e "${BLUE}================ FILE CONTENT: $target_svc =================${NC}"
+        log "${YELLOW}[*] Auto-quarantining suspicious service files...${NC}"
+        for target_svc in "${service_files[@]}"; do
+            if [ ! -f "$target_svc" ]; then continue; fi
+            if grep -Eq "bash|sh |curl|wget|base64" "$target_svc" 2>/dev/null; then
+                echo -e "${RED}[!!!] DANGER: Suspicious commands in $target_svc${NC}"
                 head -n 50 "$target_svc"
                 echo -e "${BLUE}============================================================${NC}"
-                if grep -Eq "bash|sh |curl|wget|base64" "$target_svc" 2>/dev/null; then echo -e "${RED}[!!!] DANGER: Suspicious commands detected!${NC}"; fi
-                ask "${RED}Confirm QUARANTINE & DELETE? (y/n): ${NC}" confirm
-                if [[ "$confirm" =~ ^[yY] ]]; then
-                    svc_name=$(basename "$target_svc")
-                    systemctl stop "$svc_name" 2>/dev/null || true
-                    systemctl disable "$svc_name" 2>/dev/null || true
-                    quarantine_and_remove "$target_svc"
-                    systemctl daemon-reload 2>/dev/null || true
-                fi
-            else echo "Invalid selection."; fi
+                svc_name=$(basename "$target_svc")
+                systemctl stop "$svc_name" 2>/dev/null || true
+                systemctl disable "$svc_name" 2>/dev/null || true
+                quarantine_and_remove "$target_svc"
+                systemctl daemon-reload 2>/dev/null || true
+            fi
         done
     fi
 }
@@ -686,13 +652,11 @@ scan_rootkit() {
     suspicious_users=$(awk -F: '($3 == 0 && $1 != "root") {print $1}' /etc/passwd)
     if [ -n "$suspicious_users" ]; then
         echo -e "${RED}[!!!] DANGER: Backdoor user (UID 0) found: $suspicious_users${NC}"
-        ask "Delete user '$suspicious_users'? (y/n): " c
-        if [[ "$c" =~ ^[yY] ]]; then
-            if userdel -f "$suspicious_users" 2>/dev/null; then
-                log "${GREEN}[✔] User $suspicious_users deleted.${NC}"
-            else
-                log "${RED}[X] Failed to delete user $suspicious_users${NC}"
-            fi
+        log "${YELLOW}[*] Auto-deleting backdoor user...${NC}"
+        if userdel -f "$suspicious_users" 2>/dev/null; then
+            log "${GREEN}[✔] User $suspicious_users deleted.${NC}"
+        else
+            log "${RED}[X] Failed to delete user $suspicious_users${NC}"
         fi
     else
         log "${GREEN}[OK] No extra UID 0 users found.${NC}"
@@ -714,8 +678,8 @@ scan_rootkit() {
     if [ -s /etc/ld.so.preload ]; then
          echo -e "${RED}[!!!] CRITICAL: /etc/ld.so.preload found!${NC}"
          cat /etc/ld.so.preload
-         ask "Delete this file? (y/n): " rm_preload
-         [[ "$rm_preload" =~ ^[yY] ]] && quarantine_and_remove "/etc/ld.so.preload"
+         log "${YELLOW}[*] Auto-removing /etc/ld.so.preload...${NC}"
+         quarantine_and_remove "/etc/ld.so.preload"
     else
          echo -e "${GREEN}[OK] No global LD_PRELOAD found.${NC}"
     fi
@@ -759,33 +723,11 @@ scan_rootkit() {
             echo -e "[$cnt] [$info] $item"; ((cnt++))
         done
 
-        while true; do
-            echo ""; ask "Select Number to INSPECT (Enter to continue): " choice
-            if [ -z "$choice" ]; then break; fi
-            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#hidden_items[@]}" ]; then
-                index=$((choice-1)); target_item="${hidden_items[$index]}"
-                if [ ! -e "$target_item" ]; then echo "Item not found."; continue; fi
-
-                echo -e "${BLUE}--- Inspecting: $target_item ---${NC}"
-
-                if [ -d "$target_item" ]; then
-                    echo -e "${YELLOW}Recursive Listing (Depth 3):${NC}"
-                    find "$target_item" -maxdepth 3 -ls 2>/dev/null || true
-                else
-                    ls -alh "$target_item" 2>/dev/null || true
-                    echo -e "${YELLOW}Type:${NC} $(file -b "$target_item" 2>/dev/null)"
-                    if file "$target_item" 2>/dev/null | grep -q "text"; then
-                        echo -e "${YELLOW}Content Preview:${NC}"
-                        head -n 20 "$target_item" 2>/dev/null || true
-                    fi
-                fi
-
-                echo -e "${BLUE}--------------------------------${NC}"
-                ask "${RED}Confirm QUARANTINE & DELETE? (y/n): ${NC}" confirm
-                if [[ "$confirm" =~ ^[yY] ]]; then
-                    quarantine_and_remove "$target_item"
-                fi
-            else echo "Invalid selection."; fi
+        log "${YELLOW}[*] Auto-quarantining all hidden/suspicious items...${NC}"
+        for target_item in "${hidden_items[@]}"; do
+            if [ ! -e "$target_item" ]; then continue; fi
+            echo -e "${BLUE}--- Auto-Quarantine: $target_item ---${NC}"
+            quarantine_and_remove "$target_item"
         done
     fi
 }
@@ -807,14 +749,11 @@ scan_ssh() {
                 cat "$auth_file" 2>/dev/null || true
                 echo "---------------------------------------------------"
 
-                ask "${RED}Edit this file? (y/n): ${NC}" c
-                if [[ "$c" =~ ^[yY] ]]; then
-                    if cp "$auth_file" "${auth_file}.bak"; then
-                        ${EDITOR:-vi} "$auth_file" < /dev/tty || log "${RED}[X] Failed to edit $auth_file${NC}"
-                        log "Updated: $auth_file"
-                    else
-                        log "${RED}[X] Failed to backup $auth_file${NC}"
-                    fi
+                log "${YELLOW}[*] Auto-backing up $auth_file (for manual review)${NC}"
+                if cp "$auth_file" "${auth_file}.bak" 2>/dev/null; then
+                    log "${GREEN}[✔] Backed up: ${auth_file}.bak${NC}"
+                else
+                    log "${RED}[X] Failed to backup $auth_file${NC}"
                 fi
                 echo ""
             fi
